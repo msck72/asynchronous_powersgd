@@ -30,7 +30,7 @@ The configuration overrides we used for all our experiments can be found in the 
 
 config = dict(
     average_reset_epoch_interval=30,
-    distributed_backend="nccl",
+    distributed_backend="nccl" if torch.cuda.is_available() else "gloo",
     fix_conv_weight_norm=False,
     num_epochs=300,
     checkpoints=[],
@@ -66,6 +66,8 @@ config = dict(
 
 output_dir = "./output.tmp"  # will be overwritten by run.py
 
+os.environ["DATA"] = os.getcwd()
+
 
 def main():
     torch.manual_seed(config["seed"] + config["rank"])
@@ -97,7 +99,9 @@ def main():
         elif config["task"] == "LSTM":
             download_wikitext2()
     torch.distributed.barrier()
-    torch.cuda.synchronize()
+    
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
 
     task = tasks.build(task_name=config["task"], device=device, timer=timer, **config)
