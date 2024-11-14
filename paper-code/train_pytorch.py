@@ -31,7 +31,7 @@ The configuration overrides we used for all our experiments can be found in the 
 """
 
 config = dict(
-    distributed_backend="nccl",
+    distributed_backend="nccl" if torch.cuda.is_available() else "gloo",
     fix_conv_weight_norm=False,
     num_epochs=300,
     checkpoints=[],
@@ -65,6 +65,7 @@ config = dict(
 
 output_dir = "./output.tmp"  # will be overwritten by run.py
 
+os.environ["DATA"] = os.getcwd()
 
 def main():
     torch.manual_seed(config["seed"] + config["rank"])
@@ -99,7 +100,7 @@ def main():
         elif config["task"] == "LSTM":
             download_wikitext2()
     torch.distributed.barrier()
-    torch.cuda.synchronize()
+    #torch.cuda.synchronize()
 
     task = tasks.build(task_name=config["task"], device=device, timer=timer, **config)
 
@@ -115,12 +116,12 @@ def main():
         )
 
         def hook(
-            state: powerSGD.PowerSGDState, bucket: dist._GradBucket
-        ) -> torch.futures.Future:
+            state: powerSGD.PowerSGDState, bucket: dist.GradBucket
+        ) -> torch.futures.Future[torch.Tensor]:
             start = time.time_ns() / 1_000_000_000
 
             def stop_the_time(fut):
-                torch.cuda.synchronize()
+                #torch.cuda.synchronize()
                 end = time.time_ns() / 1_000_000_000
                 timer.report("batch.reduce", start, end)
                 return fut.value()
@@ -132,12 +133,12 @@ def main():
     elif config["fp16_compression"]:
 
         def hook(
-            process_group: dist.ProcessGroup, bucket: dist._GradBucket
-        ) -> torch.futures.Future:
+            process_group: dist.ProcessGroup, bucket: dist.GradBucket
+        ) -> torch.futures.Future[torch.Tensor]:
             start = time.time_ns() / 1_000_000_000
 
             def stop_the_time(fut):
-                torch.cuda.synchronize()
+                #torch.cuda.synchronize()
                 end = time.time_ns() / 1_000_000_000
                 timer.report("batch.reduce", start, end)
                 return fut.value()
@@ -149,12 +150,12 @@ def main():
     else:
 
         def hook(
-            process_group: dist.ProcessGroup, bucket: dist._GradBucket
-        ) -> torch.futures.Future:
+            process_group: dist.ProcessGroup, bucket: dist.GradBucket
+        ) -> torch.futures.Future[torch.Tensor]:
             start = time.time_ns() / 1_000_000_000
 
             def stop_the_time(fut):
-                torch.cuda.synchronize()
+                #torch.cuda.synchronize()
                 end = time.time_ns() / 1_000_000_000
                 timer.report("batch.reduce", start, end)
                 return fut.value()
@@ -174,7 +175,7 @@ def main():
         start = time.time_ns() / 1_000_000_000
 
         def stop_the_time(fut):
-            torch.cuda.synchronize()
+            #torch.cuda.synchronize()
             end = time.time_ns() / 1_000_000_000
             timer.report("all_reduce", start, end)
             return fut.value()
