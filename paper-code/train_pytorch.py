@@ -8,6 +8,7 @@ import time
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch.distributed
 import torch.distributed.algorithms.ddp_comm_hooks.default_hooks as default_hooks
 import torch.distributed.algorithms.ddp_comm_hooks.powerSGD_hook as powerSGD
 
@@ -88,11 +89,16 @@ def main():
     )
     process_group = torch.distributed.init_process_group(
         backend=config["distributed_backend"],
-        init_method="file://" + os.path.abspath(config["distributed_init_file"]),
+        # init_method="file://" + os.path.abspath(config["distributed_init_file"]),
         timeout=datetime.timedelta(seconds=120),
-        world_size=config["n_workers"],
-        rank=config["rank"],
+        # world_size=config["n_workers"],
+        # rank=config["rank"],
     )
+
+    config["rank"] = torch.distributed.get_rank()
+    config["n_workers"] = torch.distributed.get_world_size()
+
+    print(f"(train_pytorch.py.main) WorldSize = {torch.distributed.get_world_size()} rank = {torch.distributed.get_rank()}")
 
     if torch.distributed.get_rank() == 0:
         if config["task"] == "Cifar":
@@ -206,6 +212,9 @@ def main():
     )
 
     for epoch in range(config["num_epochs"]):
+        
+        print(f"\n\n(train_pytorch.py.main) epoch number = {epoch}")
+
         epoch_metrics = MeanAccumulator()
         info(
             {
@@ -215,7 +224,10 @@ def main():
         )
 
         train_loader = task.train_iterator(config["optimizer_batch_size"])
+        print(f"len of trainloader = {len(train_loader)}")
         for i, batch in enumerate(train_loader):
+
+            print(f"\n\n(train_pytorch.py.main.BATCHLOOP) batch number = {i}")
             epoch_frac = epoch + i / len(train_loader)
 
             with timer("batch", epoch_frac):
