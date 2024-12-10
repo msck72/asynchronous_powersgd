@@ -99,6 +99,8 @@ def main():
         elif config["task"] == "LSTM":
             download_wikitext2()
     torch.distributed.barrier()
+
+    print(f"(train.py.main) Worldsize = {torch.distributed.get_world_size()} Rank is known here {int(os.environ['RANK'])}")
     
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -114,6 +116,8 @@ def main():
     momenta = [torch.empty_like(param) for param in task.state]  # need initialization
     send_buffers = [torch.zeros_like(param) for param in task.state]
     for epoch in range(config["num_epochs"]):
+
+        print(f"\n\nEpoch Number {epoch}")
         epoch_metrics = MeanAccumulator()
         info({"state.progress": float(epoch) / config["num_epochs"], "state.current_epoch": epoch})
 
@@ -129,6 +133,7 @@ def main():
 
         train_loader = task.train_iterator(config["optimizer_batch_size"])
         for i, batch in enumerate(train_loader):
+            print(f"\n\nBatch Number = {i}")
             epoch_frac = epoch + i / len(train_loader)
             lrs = [get_learning_rate(epoch_frac, name) for name in task.parameter_names]
 

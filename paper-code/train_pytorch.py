@@ -94,6 +94,7 @@ def main():
         # world_size=config["n_workers"],
         # rank=config["rank"],
     )
+    
 
     config["rank"] = torch.distributed.get_rank()
     config["n_workers"] = torch.distributed.get_world_size()
@@ -227,7 +228,7 @@ def main():
         print(f"len of trainloader = {len(train_loader)}")
         for i, batch in enumerate(train_loader):
 
-            print(f"\n\n(train_pytorch.py.main.BATCHLOOP) batch number = {i}")
+            # print(f"\n\n(train_pytorch.py.main.BATCHLOOP) batch number = {i}")
             epoch_frac = epoch + i / len(train_loader)
 
             with timer("batch", epoch_frac):
@@ -456,14 +457,19 @@ def log_metric(name, values, tags={}):
     value_list = []
     for key in sorted(values.keys()):
         value = values[key]
-        value_list.append(f"{key}:{value:7.3f}")
+        value_list.append(f"{value:7.3f}")
     values = ", ".join(value_list)
     tag_list = []
     for key, tag in tags.items():
         tag_list.append(f"{key}:{tag}")
     tags = ", ".join(tag_list)
-    print("{name:30s} - {values} ({tags})".format(name=name, values=values, tags=tags))
+    # print("{rank} {name:30s} - {values} ({tags})".format(rank=config['rank'], name=name, values=values, tags=tags))
 
+    os.makedirs(f"./logs/{config['rank']}_logs", exist_ok=True)
+
+    tags=tags.split(':')[1]
+    with open(f"./logs/{config['rank']}_logs/{tags}.txt", "a") as log_file:
+        log_file.write("{rank},{tags:30s},{values}\n".format(rank=config['rank'], name=name, values=values, tags=tags))
 
 def info(*args, **kwargs):
     if config["rank"] == 0:
@@ -471,9 +477,10 @@ def info(*args, **kwargs):
 
 
 def metric(*args, **kwargs):
-    if config["rank"] == 0:
-        log_metric(*args, **kwargs)
-
+    # if config["rank"] == 0:
+    #     log_metric(*args, **kwargs)
+    
+    log_metric(*args, **kwargs)
 
 def check_model_consistency_across_workers(model, epoch):
     signature = []
