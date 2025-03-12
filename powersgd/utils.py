@@ -40,10 +40,10 @@ def flatten(tensors: List[List[torch.Tensor]]) -> List[torch.Tensor]:
     return out
 
 
-def allreduce_average(data, *args, **kwargs):
+def allreduce_average(data, group, *args, **kwargs):
     """All-reduce average if torch.distributed is available, otherwise do nothing"""
     if is_distributed():
-        data.div_(torch.distributed.get_world_size())  # type: ignore
-        return torch.distributed.all_reduce(data, *args, **kwargs)  # type: ignore
+        data.div_(torch.distributed.get_world_size(group))  # type: ignore
+        return torch.distributed.all_reduce(data, group=group, *args, **kwargs)  # type: ignore
     else:
         return SimpleNamespace(wait=lambda: None)

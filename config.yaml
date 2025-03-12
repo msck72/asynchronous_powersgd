@@ -1,0 +1,15 @@
+compress: True
+divide_groups: True
+num_groups: 2
+synchronization_freq: 10
+
+compressor_conf: #only used when compress is set to True
+    rank: 2  # lower rank => more aggressive compression
+    min_compression_rate: 2  # skip compression on some gradients
+    num_iters_per_step: 1  # lower number => more aggressive compression
+    start_compressing_after_num_steps: 50
+
+
+# to do next:
+# remove the timer of some as that will take some time everytime, but log in randomly\
+# add total time taken to each step instead

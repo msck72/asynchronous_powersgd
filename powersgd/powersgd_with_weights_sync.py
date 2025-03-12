@@ -75,6 +75,17 @@ class PowerSGD(Aggregator):
             self._powersgd.aggregate(compressed_grads, dist_group, timer),
             self._allreduce.aggregate(uncompressed_grads, dist_group, timer),
         )
+        
+    def aggregate_parameters(self, parameters, dist_group, timer):
+        
+        if self.step_counter <= self.config.start_compressing_after_num_steps:
+            return self._allreduce.aggregate(parameters, dist_group, timer)
+
+        compressed_params, uncompressed_params = self._split(parameters)
+        return self._merge(
+            self._powersgd.aggregate_parameters(compressed_params, dist_group, timer),
+            self._allreduce.aggregate(uncompressed_params, dist_group, timer),
+        )
 
     def _split(self, params: List[torch.Tensor]):
         compressed_params = []
@@ -146,6 +157,22 @@ class BasicPowerSGD(Aggregator):
         )
         self._qs = unpack(self._qs_buffer, qs_shapes)
         
+        # related to parameters
+        self._ps_params_buffer, ps_params_shapes = pack(
+            [
+                self._init_p_batch(shape, params)
+                for shape, params in self.params_per_shape.items()
+            ]
+        )
+        self._ps_params = unpack(self._ps_params_buffer, ps_params_shapes)
+
+        self._qs_params_buffer, qs_params_shapes = pack(
+            [
+                self._init_q_batch(shape, params)
+                for shape, params in self.params_per_shape.items()
+            ]
+        )
+        self._qs_params = unpack(self._qs_params_buffer, qs_params_shapes)
 
     def aggregate(self, gradients: List[torch.Tensor], dist_group, timer) -> List[torch.Tensor]:
         """
@@ -241,6 +268,98 @@ class BasicPowerSGD(Aggregator):
 
         return output_tensors
     
+    
+
+    def aggregate_parameters(self, parameters: List[torch.Tensor], dist_group, timer=None) -> List[torch.Tensor]:
+        """
+        Create a low-rank approximation of the average parameters by communicating with other workers.
+        """
+        output_tensors = [torch.empty_like(p) for p in parameters]
+        parameters_per_shape = self._matrices_per_shape(parameters)
+        # for k, v in parameters_per_shape.items():
+        #     for vi in v:
+        #         print(f'{vi.shape}', end=' ')
+        #     # print(f'{type(v)} {len(v)}', end=' ')
+        #     print()
+        # print()
+        outputs_per_shape = self._matrices_per_shape(output_tensors)
+        
+        shape_groups = [
+            dict(
+                shape=shape,
+                params=matrices,
+                outputs=outputs_per_shape[shape],
+                param_batch=torch.stack(matrices),
+                approximation=torch.zeros(
+                    size=(len(matrices), *shape), device=self.device, dtype=self.dtype
+                ),
+            )
+            for shape, matrices in list(parameters_per_shape.items())
+        ]
+        
+        # for i in shape_groups:
+        #     print(i.keys())
+            
+        num_iters_per_step = self.config.num_iters_per_step
+        for it in range(num_iters_per_step):
+            # Alternate between left and right matrix multiplications
+            iter_is_even = (self.step_counter * num_iters_per_step + it) % 2 == 0
+            if iter_is_even:
+                maybe_transpose = lambda g: g
+                out_batches, in_batches = self._qs_params, self._ps_params
+                out_buffer = self._qs_params_buffer
+            else:
+                maybe_transpose = batch_transpose
+                out_batches, in_batches = self._ps_params, self._qs_params
+                out_buffer = self._ps_params_buffer
+
+            # Matrix multiplication
+            for group, in_batch, out_batch in zip(
+                shape_groups, in_batches, out_batches
+            ):
+                # print(f'group[param_batch] = {group["param_batch"].shape} in_batch = {in_batch.shape} out_batch = {out_batch.shape}')
+                orthogonalize(in_batch)
+                torch.bmm(
+                    batch_transpose(maybe_transpose(group["param_batch"])), 
+                    in_batch, 
+                    out=out_batch
+                )
+
+            for group, in_batch, out_batch in zip(
+                shape_groups, in_batches, out_batches
+            ):
+                maybe_transpose(group["param_batch"]).baddbmm_(
+                    in_batch, 
+                    batch_transpose(out_batch), 
+                    alpha=-1
+                )
+
+            
+            if is_distributed():
+                num_workers = torch.distributed.get_world_size(dist_group)
+                torch.distributed.all_reduce(out_buffer, group=dist_group)
+            else:
+                num_workers = 1
+    
+            
+            # Construct low-rank reconstruction and update the approximation and error buffer
+            for group, in_batch, out_batch in zip(
+                shape_groups, in_batches, out_batches
+            ):
+                maybe_transpose(group["approximation"]).baddbmm_(
+                    in_batch, 
+                    batch_transpose(out_batch),
+                    alpha=1/num_workers
+                )
+
+        for group in shape_groups:
+            for o, m, approx, mb in zip(
+                group["outputs"], group["params"], group["approximation"], group["param_batch"]
+            ):
+                o.copy_(approx)
+                m.copy_(mb)
+
+        return output_tensors
     
 
     def _init_p_batch(
