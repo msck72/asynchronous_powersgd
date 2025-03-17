@@ -10,7 +10,7 @@ from powersgd.utils import allreduce_average, pack, unpack, is_distributed
 
 class Aggregator(ABC):
     @abstractmethod
-    def aggregate(self, gradients: List[torch.Tensor], group, dist_grp_ind, timer) -> List[torch.Tensor]:
+    def aggregate(self, gradients: List[torch.Tensor], group, timer) -> List[torch.Tensor]:
         """
         Aggregates gradients across workers into an (approximate) average gradient.
         This method also changes its input gradients. It either sets them to zero if there is no compression,
@@ -20,7 +20,7 @@ class Aggregator(ABC):
 
 
 class AllReduce(Aggregator):
-    def aggregate(self, gradients: List[torch.Tensor], group, dist_grp_ind, timer) -> List[torch.Tensor]:
+    def aggregate(self, gradients: List[torch.Tensor], group, timer) -> List[torch.Tensor]:
         if len(gradients) == 0:
             return []
         with timer('only_compress'):
@@ -64,16 +64,16 @@ class PowerSGD(Aggregator):
         )
         self._allreduce = AllReduce()
 
-    def aggregate(self, gradients: List[torch.Tensor], dist_group, dist_grp_ind, timer) -> List[torch.Tensor]:
+    def aggregate(self, gradients: List[torch.Tensor], dist_group, timer) -> List[torch.Tensor]:
         self.step_counter += 1
 
         if self.step_counter <= self.config.start_compressing_after_num_steps:
-            return self._allreduce.aggregate(gradients, dist_group, dist_grp_ind, timer)
+            return self._allreduce.aggregate(gradients, dist_group, timer)
 
         compressed_grads, uncompressed_grads = self._split(gradients)
         return self._merge(
-            self._powersgd.aggregate(compressed_grads, dist_group, dist_grp_ind, timer),
-            self._allreduce.aggregate(uncompressed_grads, dist_group, dist_grp_ind, timer),
+            self._powersgd.aggregate(compressed_grads, dist_group, timer),
+            self._allreduce.aggregate(uncompressed_grads, dist_group, timer),
         )
 
     def _split(self, params: List[torch.Tensor]):
@@ -146,11 +146,8 @@ class BasicPowerSGD(Aggregator):
         )
         self._qs = unpack(self._qs_buffer, qs_shapes)
         
-        self.prev_grp_ind = None
-        self.past_output_buffer = None
-        
 
-    def aggregate(self, gradients: List[torch.Tensor], dist_group, dist_grp_ind, timer) -> List[torch.Tensor]:
+    def aggregate(self, gradients: List[torch.Tensor], dist_group, timer) -> List[torch.Tensor]:
         """
         Create a low-rank approximation of the average gradients by communicating with other workers.
         Modifies its inputs so that they contain the 'approximation error', used for the error feedback
@@ -214,6 +211,10 @@ class BasicPowerSGD(Aggregator):
                 with timer("only_all_reduce"):
                     if is_distributed():
                         num_workers = torch.distributed.get_world_size(dist_group)
+                        # try sharing both p and q estimates
+                        # torch.distributed.all_reduce(self._ps_buffer, group=dist_group)
+                        # torch.distributed.all_reduce(self._qs_buffer, group=dist_group)
+                        
                         torch.distributed.all_reduce(out_buffer, group=dist_group)
                     else:
                         num_workers = 1
