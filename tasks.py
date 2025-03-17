@@ -6,7 +6,7 @@ import torch.distributed as dist
 from utils import setup_groups, all_reduce_gradients, synchronize_weights
 from timer import Timer
 
-from powersgd.powersgd import PowerSGD
+from powersgd.grouped_powersgd import PowerSGD
 
 def train(model : torch.nn.Module, train_loader, test_loader, compressor : PowerSGD, timer: Timer, train_config):
     
@@ -14,15 +14,20 @@ def train(model : torch.nn.Module, train_loader, test_loader, compressor : Power
     print(f"----------------HAPPY TRAINING---------------")
     
 
+    
+
     EPOCHS = 5
     group_cache = {}
     # group_cache['default_group'] = dist.new_group([i for i in range(dist.get_world_size())])
     group_cache['default_group'] = dist.group.WORLD
+    error_feedback = [torch.zeros_like(p) for p in model.parameters()]
 
     optimizer = optim.SGD(model.parameters(), lr=0.001)
     criterion = F.cross_entropy
 
-    print(f"len of trainloder = {len(train_loader)}")
+    test(model, test_loader, timer)
+
+
 
     for epoch in range(EPOCHS):
         print(f"epoch = {epoch}")
@@ -46,10 +51,12 @@ def train(model : torch.nn.Module, train_loader, test_loader, compressor : Power
             # To do so update the powersgd by sending the group as well...
 
             if compressor:
-                gradients = [param.grad for param in model.parameters()]
+                for ef, p in zip(error_feedback, model.parameters()):
+                    if p.grad is not None:
+                        ef = ef.add_(p.grad)
 
                 with timer("aggregate_graddients", i):
-                    aggregated_gradients = compressor.aggregate(gradients = gradients, dist_group=my_group, timer=timer)
+                    aggregated_gradients = compressor.aggregate(gradients = error_feedback, dist_group=my_group, timer=timer)
 
                 with timer('copying_agg_gradients', i):
                     for param, agg_grad in zip(model.parameters(), aggregated_gradients):
