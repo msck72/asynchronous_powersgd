@@ -155,22 +155,7 @@ class BasicPowerSGD(Aggregator):
         Create a low-rank approximation of the average gradients by communicating with other workers.
         Modifies its inputs so that they contain the 'approximation error', used for the error feedback
         mechanism.
-        """
-
-        # get the number of common ids between prev round and current round nodes
-        # by doing so we get an idea of these common nodes had same weights...
-        num_of_common_nodes = 0
-        this_round_nodes = set()
-        min_prev_comm_node = float('inf')
-        for node_i in dist_grp_ind:
-            if self.prev_grp_ind and node_i in self.prev_grp_ind:
-                num_of_common_nodes += 1
-                if min_prev_comm_node > node_i:
-                    min_prev_comm_node = node_i
-            this_round_nodes.add(node_i)
-        self.prev_grp_ind = this_round_nodes
-        # print(f'num_of_common_nodes = {num_of_common_nodes}')
-        
+        """  
 
         # Allocate memory for the return value of this function
         with timer('only_comrpess'):
@@ -228,39 +213,15 @@ class BasicPowerSGD(Aggregator):
                 # Average across workers
                 with timer("only_all_reduce"):
                     if is_distributed():
-                        print('out_buffers.shape == ', out_buffer.shape)
-                        # num_workers = torch.distributed.get_world_size(dist_group)
-                        
-                        # Add past history of gradients ()
-                        # if self.past_output_buffer is not None:
-                        #     out_buffer += self.past_output_buffer
-                        
-                        # get common group average
-                        # out_buffer = out_buffer / num_of_common_nodes
-                        
-                        torch.distributed.all_reduce(out_buffer, group=dist_group)
                         num_workers = torch.distributed.get_world_size(dist_group)
-                        
-                        # from the previous groups history of all the nodes that are participating currently in this group, get all those distinct groups history
-                        if self.past_output_buffer is not None:
-                            gathered_groups = [torch.zeros((1)) for _ in range(torch.distributed.get_world_size(dist_group))]
-                            torch.distributed.all_gather(gathered_groups, torch.tensor([min_prev_comm_node], dtype=torch.float32), group=dist_group)
-                        
-                            # remove the history that I have already seen
-                            # out_buffer = out_buffer - self.past_output_buffer
-                            # num_workers = num_distinct_grps
-                            # print(f'gathered_groups = {torch.unique(torch.tensor(gathered_groups))}')
-                        
-                        
-                        # Do we need to put just the last gradient in the history or the sum of all the gradients...??
-                        # self.past_output_buffer = out_buffer.clone().detach() / num_workers
+                        torch.distributed.all_reduce(out_buffer, group=dist_group)
                     else:
                         num_workers = 1
 
                 with timer('update_approximation'):
                     # Construct low-rank reconstruction and update the approximation and error buffer
                     for group, in_batch, out_batch in zip(
-                        shape_groups, in_batches, out_batches # also add zip with PREV APPROXIMATION...
+                        shape_groups, in_batches, out_batches
                     ):
                         maybe_transpose(group["approximation"]).baddbmm_(
                             in_batch, 
@@ -285,7 +246,6 @@ class BasicPowerSGD(Aggregator):
         return output_tensors
     
     
-
     def _init_p_batch(
         self, shape: torch.Size, params: List[torch.Tensor]
     ) -> torch.Tensor:
