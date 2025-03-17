@@ -7,6 +7,7 @@ import torch
 from powersgd.orthogonalization import orthogonalize
 from powersgd.utils import allreduce_average, pack, unpack, is_distributed
 
+ALPHA = 0
 
 class Aggregator(ABC):
     @abstractmethod
@@ -145,6 +146,10 @@ class BasicPowerSGD(Aggregator):
             ]
         )
         self._qs = unpack(self._qs_buffer, qs_shapes)
+
+        # Create a history of ps and qs buffer
+        self.history_ps = torch.zeros_like(self._ps_buffer)
+        self.history_qs = torch.zeros_like(self._qs_buffer)
         
         
 
@@ -209,8 +214,34 @@ class BasicPowerSGD(Aggregator):
             # Average across workers
             if is_distributed():
                 num_workers = torch.distributed.get_world_size(dist_group)
+
+                # add the history that I have seen
+                # p + alpha * history
+                # self._ps_buffer.add_(self.history_ps, alpha=ALPHA)
+                # q + alpha * history
+                # self._qs_buffer.add_(self.history_qs, alpha=ALPHA)
+                # print(f'{torch.distributed.get_rank()}ps_buffer = {self._ps_buffer}')
+                # print(f'{torch.distributed.get_rank()}qs_buffer = {self._qs_buffer}')
+
                 torch.distributed.all_reduce(self._ps_buffer, group=dist_group)
                 torch.distributed.all_reduce(self._qs_buffer, group=dist_group)
+
+                # remove the history that I have seen
+                # p - (aplha * history / num_workers)
+                # self._ps_buffer.sub_(self.history_ps, alpha=ALPHA)
+                # q - (alpha * history / num_workers)
+                # self._qs_buffer.sub_(self.history_qs, alpha=ALPHA)
+                # print(f'{torch.distributed.get_rank()}ps_buffer = {self._ps_buffer}')
+                # print(f'{torch.distributed.get_rank()}qs_buffer = {self._qs_buffer}')
+
+                # update the history
+                # history = p + alpha * history
+                # self.history_ps.mul_(ALPHA)
+                # self.history_ps.add_(self._ps_buffer)
+                # history = q + alpha * history
+                # self.history_qs.mul_(ALPHA)
+                # self.history_qs.add_(self._qs_buffer)
+
             else:
                 num_workers = 1
 
