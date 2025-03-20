@@ -6,7 +6,8 @@ import torch.distributed as dist
 from utils import setup_groups, all_reduce_gradients, synchronize_weights
 from timer import Timer
 
-from powersgd.grouped_powersgd import PowerSGD
+from powersgd.powersgd import PowerSGD
+from powersgd import optimizer_step
 
 def train(model : torch.nn.Module, train_loader, test_loader, compressor : PowerSGD, timer: Timer, train_config):
     
@@ -20,20 +21,20 @@ def train(model : torch.nn.Module, train_loader, test_loader, compressor : Power
     group_cache = {}
     # group_cache['default_group'] = dist.new_group([i for i in range(dist.get_world_size())])
     group_cache['default_group'] = dist.group.WORLD
-    error_feedback = [torch.zeros_like(p) for p in model.parameters()]
 
-    optimizer = optim.SGD(model.parameters(), lr=0.001)
+    optimizer = optim.SGD(model.parameters(), lr=0.1)
     criterion = F.cross_entropy
 
-    test(model, test_loader, timer)
+    # test(model, test_loader, timer)
 
 
 
     for epoch in range(EPOCHS):
         print(f"epoch = {epoch}")
         model.train()
-        for i, (images, targets) in enumerate(train_loader):    
-            optimizer.zero_grad()
+        for i, (images, targets) in enumerate(train_loader):
+            # Is takn care by the optimizer_step function    
+            # optimizer.zero_grad()
             
             y_hat = model(images)
 
@@ -42,57 +43,18 @@ def train(model : torch.nn.Module, train_loader, test_loader, compressor : Power
             with timer('backward'):
                 loss.backward()
 
-            my_group = setup_groups(i, group_cache, train_config['divide_groups'])
-            
-            # print(f'group size = {dist.get_world_size(my_group)}')
-            # print(f"New groups created\n\n")
-
-            # reduce the gradients and find the effective gradient
-            # To do so update the powersgd by sending the group as well...
+            my_group, my_group_id = setup_groups(i, group_cache, train_config['divide_groups'])
 
             if compressor:
-                for ef, p in zip(error_feedback, model.parameters()):
-                    if p.grad is not None:
-                        ef = ef.add_(p.grad)
-
-                with timer("aggregate_graddients", i):
-                    aggregated_gradients = compressor.aggregate(gradients = error_feedback, dist_group=my_group, timer=timer)
-
-                with timer('copying_agg_gradients', i):
-                    for param, agg_grad in zip(model.parameters(), aggregated_gradients):
-                        if param.grad is not None:
-                            param.grad.copy_(agg_grad)
+                optimizer_step(optimizer, compressor, my_group, my_group_id, timer)
             else:
                 all_reduce_gradients(model, my_group, timer)
 
 
             my_group = None
-            # print("Stuck in all_reduce_gradients\n\n")
 
-            optimizer.step()
-
-            # print(f"processing batch {i} done")
-        #     if i != 0 and train_config['divide_groups'] and i % int(train_config['synchronization_freq']) == 0:
-        #         with torch.no_grad():
-        #             if compressor:
-        #                 aggregated_weights = compressor.aggregate_parameters(list(model.parameters()), dist_group=group_cache['default_group'], timer=timer)
-                        
-        #                 for param, new_val in zip(model.parameters(), aggregated_weights):
-        #                     param.data.copy_(new_val) 
-        #             else:
-        #                 synchronize_weights(model, timer=timer)
-        #         print(f"Synchronization done")
-            
-        # if train_config['divide_groups']:
-        #     with torch.no_grad():
-        #         if compressor:
-        #                 aggregated_weights = compressor.aggregate_parameters(list(model.parameters()), dist_group=group_cache['default_group'], timer=timer)
-
-        #                 for param, new_val in zip(model.parameters(), aggregated_weights):
-        #                     param.data.copy_(new_val)
-        #         else:
-        #             synchronize_weights(model, timer=timer)
-        #     print(f"Synchronization done")
+            # is handled by the optimizer_step function
+            # optimizer.step()
     
         test(model, test_loader, timer)
         

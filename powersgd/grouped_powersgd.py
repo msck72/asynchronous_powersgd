@@ -7,11 +7,11 @@ import torch
 from powersgd.orthogonalization import orthogonalize
 from powersgd.utils import allreduce_average, pack, unpack, is_distributed
 
-ALPHA = 0
+ALPHA = 0.1
 
 class Aggregator(ABC):
     @abstractmethod
-    def aggregate(self, gradients: List[torch.Tensor], group, timer) -> List[torch.Tensor]:
+    def aggregate(self, gradients: List[torch.Tensor], group, dist_group_id, timer) -> List[torch.Tensor]:
         """
         Aggregates gradients across workers into an (approximate) average gradient.
         This method also changes its input gradients. It either sets them to zero if there is no compression,
@@ -21,7 +21,7 @@ class Aggregator(ABC):
 
 
 class AllReduce(Aggregator):
-    def aggregate(self, gradients: List[torch.Tensor], group, timer) -> List[torch.Tensor]:
+    def aggregate(self, gradients: List[torch.Tensor], group, dist_group_id, timer) -> List[torch.Tensor]:
         if len(gradients) == 0:
             return []
         with timer('only_compress'):
@@ -65,16 +65,16 @@ class PowerSGD(Aggregator):
         )
         self._allreduce = AllReduce()
 
-    def aggregate(self, gradients: List[torch.Tensor], dist_group, timer) -> List[torch.Tensor]:
+    def aggregate(self, gradients: List[torch.Tensor], dist_group, dist_group_id, timer) -> List[torch.Tensor]:
         self.step_counter += 1
 
         if self.step_counter <= self.config.start_compressing_after_num_steps:
-            return self._allreduce.aggregate(gradients, dist_group, timer)
+            return self._allreduce.aggregate(gradients, dist_group, dist_group_id, timer)
 
         compressed_grads, uncompressed_grads = self._split(gradients)
         return self._merge(
-            self._powersgd.aggregate(compressed_grads, dist_group, timer),
-            self._allreduce.aggregate(uncompressed_grads, dist_group, timer),
+            self._powersgd.aggregate(compressed_grads, dist_group, dist_group_id, timer),
+            self._allreduce.aggregate(uncompressed_grads, dist_group, dist_group_id, timer),
         )
 
     def _split(self, params: List[torch.Tensor]):
@@ -150,10 +150,13 @@ class BasicPowerSGD(Aggregator):
         # Create a history of ps and qs buffer
         self.history_ps = torch.zeros_like(self._ps_buffer)
         self.history_qs = torch.zeros_like(self._qs_buffer)
+
+        # remember the previous round group that I belonged to
+        self.prev_round_group = torch.distributed.get_rank()
         
         
 
-    def aggregate(self, gradients: List[torch.Tensor], dist_group, timer) -> List[torch.Tensor]:
+    def aggregate(self, gradients: List[torch.Tensor], dist_group, dist_group_id, timer) -> List[torch.Tensor]:
         """
         Create a low-rank approximation of the average gradients by communicating with other workers.
         Modifies its inputs so that they contain the 'approximation error', used for the error feedback
@@ -215,32 +218,43 @@ class BasicPowerSGD(Aggregator):
             if is_distributed():
                 num_workers = torch.distributed.get_world_size(dist_group)
 
+
+                # In this particular round, get the details of all the participating nodes immediate history(the group in which they have participated in last round)
+                prev_rnd_groups = [torch.tensor([0]) for _ in range(num_workers)]
+                torch.distributed.all_gather(prev_rnd_groups, torch.tensor([self.prev_round_group]), dist_group)
+                # print(f'{torch.distributed.get_rank()} {prev_rnd_groups}')
+
+                prev_rnd_groups = torch.stack(prev_rnd_groups, dim=1).unsqueeze(0)
+                # print(prev_rnd_groups)
+                # calculate how many belonged to the same group as this in previous round
+                num_same_prev_grp = (prev_rnd_groups == self.prev_round_group).sum().item()
+
+                # calculate how many are unique
+                eff_num_workers = len(torch.unique(prev_rnd_groups))
+
+                self.prev_round_group = dist_group_id
+
                 # add the history that I have seen
                 # p + alpha * history
-                # self._ps_buffer.add_(self.history_ps, alpha=ALPHA)
+                self._ps_buffer.add_(self.history_ps, alpha=ALPHA)
+                self._ps_buffer.mul_((1 / num_same_prev_grp))
                 # q + alpha * history
-                # self._qs_buffer.add_(self.history_qs, alpha=ALPHA)
-                # print(f'{torch.distributed.get_rank()}ps_buffer = {self._ps_buffer}')
-                # print(f'{torch.distributed.get_rank()}qs_buffer = {self._qs_buffer}')
+                self._qs_buffer.add_(self.history_qs, alpha=ALPHA)
+                self._qs_buffer.mul_((1 / num_same_prev_grp))
 
+                # print(f'{torch.distributed.get_rank()}"s group = {dist_group_id}')
+                # multipy p and q with their respective prev same group size participating in this round
                 torch.distributed.all_reduce(self._ps_buffer, group=dist_group)
                 torch.distributed.all_reduce(self._qs_buffer, group=dist_group)
 
                 # remove the history that I have seen
                 # p - (aplha * history / num_workers)
-                # self._ps_buffer.sub_(self.history_ps, alpha=ALPHA)
+                self._ps_buffer.sub_(self.history_ps, alpha=ALPHA)
                 # q - (alpha * history / num_workers)
-                # self._qs_buffer.sub_(self.history_qs, alpha=ALPHA)
-                # print(f'{torch.distributed.get_rank()}ps_buffer = {self._ps_buffer}')
-                # print(f'{torch.distributed.get_rank()}qs_buffer = {self._qs_buffer}')
+                self._qs_buffer.sub_(self.history_qs, alpha=ALPHA)
 
-                # update the history
-                # history = p + alpha * history
-                # self.history_ps.mul_(ALPHA)
-                # self.history_ps.add_(self._ps_buffer)
-                # history = q + alpha * history
-                # self.history_qs.mul_(ALPHA)
-                # self.history_qs.add_(self._qs_buffer)
+                self._ps_buffer.mul_((1 / eff_num_workers))
+                self._qs_buffer.mul_((1 / eff_num_workers))
 
             else:
                 num_workers = 1
@@ -252,8 +266,17 @@ class BasicPowerSGD(Aggregator):
                 maybe_transpose(group["approximation"]).baddbmm_(
                     in_batch, 
                     batch_transpose(out_batch),
-                    alpha=1/(num_workers * num_workers)
+                    # alpha=1 / num_workers
                 )
+            
+
+            # update the history
+            # history = p + alpha * history
+            self.history_ps.mul_(ALPHA)
+            self.history_ps.add_(self._ps_buffer)
+            # history = q + alpha * history
+            self.history_qs.mul_(ALPHA)
+            self.history_qs.add_(self._qs_buffer)
 
             
         # Un-batch the approximation and error feedback, write to the output

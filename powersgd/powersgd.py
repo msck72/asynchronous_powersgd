@@ -181,11 +181,11 @@ class BasicPowerSGD(Aggregator):
                 if iter_is_even:
                     maybe_transpose = lambda g: g
                     out_batches, in_batches = self._qs, self._ps
-                    out_buffer = self._qs_buffer
+                    out_buffer, other_buffer = self._qs_buffer, self._ps_buffer
                 else:
                     maybe_transpose = batch_transpose
                     out_batches, in_batches = self._ps, self._qs
-                    out_buffer = self._ps_buffer
+                    out_buffer, other_buffer = self._ps_buffer, self._qs_buffer
 
                 # Matrix multiplication
                 for group, in_batch, out_batch in zip(
@@ -216,6 +216,7 @@ class BasicPowerSGD(Aggregator):
                         # torch.distributed.all_reduce(self._qs_buffer, group=dist_group)
                         
                         torch.distributed.all_reduce(out_buffer, group=dist_group)
+                        out_buffer.mul_((1 / num_workers))
                     else:
                         num_workers = 1
 
@@ -227,7 +228,7 @@ class BasicPowerSGD(Aggregator):
                         maybe_transpose(group["approximation"]).baddbmm_(
                             in_batch, 
                             batch_transpose(out_batch),
-                            alpha=1/num_workers
+                            # alpha=1/num_workers
                         )
 
         # Un-batch the approximation and error feedback, write to the output

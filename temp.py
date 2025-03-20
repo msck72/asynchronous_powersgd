@@ -12,7 +12,7 @@ from utils import metric
 
 import yaml
 
-from powersgd.powersgd import PowerSGD, Config
+from powersgd.grouped_powersgd import PowerSGD, Config
 
 def main():
 

@@ -29,8 +29,8 @@ def setup_groups(seed, group_cache, divide_groups):
         group_cache[key2] = (grp2, grp1)
     
     # print(f"Groups: group1_indices  {group1_indices}, group2_indices = {group2_indices}\n\n")
-
-    return grp1 if rank in group1_indices else grp2
+    # returning process group and group ID that I belong to
+    return (grp1, group1_indices[0]) if rank in group1_indices else (grp2, group2_indices[0])
 
 def get_default_group(seed, group_cache):
 
