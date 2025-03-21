@@ -263,7 +263,7 @@ class BasicPowerSGD(Aggregator):
         
         # remove the history that you have seen    
         for group in shape_groups:
-            group['approximation'].sub_(group['history'])
+            group['approximation'].sub_(group['history'], alpha=num_same_prev_grp)
             group['approximation'].mul_((1 / (num_workers * num_workers)))
         
         # save this history to the history
