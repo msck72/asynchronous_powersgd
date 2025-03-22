@@ -7,9 +7,6 @@ import torch
 from powersgd.orthogonalization import orthogonalize
 from powersgd.utils import allreduce_average, pack, unpack, is_distributed
 
-ALPHA = 0.1
-# How much is too much??
-EFFECT = 0.1
 
 class Aggregator(ABC):
     @abstractmethod
@@ -200,9 +197,19 @@ class BasicPowerSGD(Aggregator):
             if iter_is_even:
                 maybe_transpose = lambda g: g
                 out_batches, in_batches = self._qs, self._ps
+                out_buffer, other_buffer = self._qs_buffer, self._ps_buffer
             else:
                 maybe_transpose = batch_transpose
                 out_batches, in_batches = self._ps, self._qs
+                out_buffer, other_buffer = self._ps_buffer, self._qs_buffer
+            
+            if is_distributed():
+                # if torch.get_rank == dist_group_id:
+                # then make other_buffers 0s
+                # allreduce to get the effective in_buffers
+                if torch.distributed.get_rank() != dist_group_id:
+                    other_buffer.zero_()
+                torch.distributed.all_reduce(other_buffer, group=dist_group)
 
             # Matrix multiplication
             for group, in_batch, out_batch in zip(
@@ -242,11 +249,13 @@ class BasicPowerSGD(Aggregator):
                 self.prev_round_group = dist_group_id
 
                 # multipy p and q with their respective prev same group size participating in this round
-                torch.distributed.all_reduce(self._ps_buffer, group=dist_group)
-                torch.distributed.all_reduce(self._qs_buffer, group=dist_group)
+                # torch.distributed.all_reduce(self._ps_buffer, group=dist_group)
+                # torch.distributed.all_reduce(self._qs_buffer, group=dist_group)
 
                 # self._ps_buffer.mul_((1 / num_workers))
                 # self._qs_buffer.mul_((1 / num_workers))
+
+                torch.distributed.all_reduce(out_buffer, group=dist_group)
 
             else:
                 num_workers = 1
@@ -264,7 +273,8 @@ class BasicPowerSGD(Aggregator):
         # remove the history that you have seen    
         for group in shape_groups:
             group['approximation'].sub_(group['history'], alpha=num_same_prev_grp)
-            group['approximation'].mul_((1 / (num_workers * num_workers)))
+            # group['approximation'].mul_((1 / (num_workers * num_workers)))
+            group['approximation'].mul_((1 / (num_workers)))
         
         # save this history to the history
         for group in shape_groups:
