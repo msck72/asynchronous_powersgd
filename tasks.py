@@ -3,11 +3,11 @@ import torch.optim as optim
 import torch.nn.functional as F
 import torch.distributed as dist
 
-from utils import setup_groups, all_reduce_gradients, synchronize_weights
+from utils import setup_groups, all_reduce_gradients
 from timer import Timer
 
 from powersgd.powersgd import PowerSGD
-from powersgd import optimizer_step
+from powersgd import optimizer_step, synchronize_weights, update_low_rank_weights
 
 def train(model : torch.nn.Module, train_loader, test_loader, compressor : PowerSGD, timer: Timer, train_config):
     
@@ -47,9 +47,14 @@ def train(model : torch.nn.Module, train_loader, test_loader, compressor : Power
 
             if compressor:
                 optimizer_step(optimizer, compressor, my_group, my_group_id, timer)
+                if train_config['synchronize']:
+                    update_low_rank_weights(optimizer, compressor, timer)
+                
             else:
                 all_reduce_gradients(model, my_group, timer)
 
+            if train_config['synchronize'] and i != 0 and i % train_config['synchronization_freq'] == 0:
+                synchronize_weights(optimizer, compressor, timer)
 
             my_group = None
 
