@@ -47,7 +47,7 @@ def train(model : torch.nn.Module, train_loader, test_loader, compressor : Power
 
             if compressor:
                 optimizer_step(optimizer, compressor, my_group, my_group_id, timer)
-                if train_config['synchronize']:
+                if i != 0 and train_config['synchronize']:
                     update_low_rank_weights(optimizer, compressor, timer)
                 
             else:
@@ -60,7 +60,7 @@ def train(model : torch.nn.Module, train_loader, test_loader, compressor : Power
 
             # is handled by the optimizer_step function
             # optimizer.step()
-    
+        # break
         test(model, test_loader, timer)
         
 

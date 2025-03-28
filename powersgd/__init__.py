@@ -32,7 +32,7 @@ def synchronize_weights(optimizer: torch.optim.Optimizer, aggregator, timer):
     params = []
     for group in optimizer.param_groups:
         for p in group["params"]:
-            params.append(p.detach())
+            params.append(p.clone().detach())
 
     
     sync_weights = aggregator.aggregate_parameters(params, timer)
@@ -49,8 +49,14 @@ def update_low_rank_weights(optimizer : torch.optim.Optimizer, aggregator: Aggre
     params = []
     for group in optimizer.param_groups:
         for p in group["params"]:
-            params.append(p.detach())
-        
+            params.append(p.clone().detach())
+      
     aggregator.update_low_rank_weights(params, timer)
+    
+    # if torch.distributed.get_rank() == 0:
+    #     with torch.no_grad():
+    #         tensor_lists = [p.numpy().tolist() for p in params_in_optimizer(optimizer)]
+    #         with open(f"something_after_ulrw.txt", "w") as f:
+    #             f.write(str(tensor_lists))
     
     return
