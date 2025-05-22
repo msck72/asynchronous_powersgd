@@ -1,10 +1,3 @@
-"""
-In this asynchronous parameters synchgronization in the synchronization step we estimate the change of parameters instead of estimating the parameters.
-WITHOUT SCALING
-"""
-
-
-
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Dict, List, NamedTuple, Union
@@ -14,9 +7,6 @@ import torch
 
 from powersgd.orthogonalization import orthogonalize
 from powersgd.utils import allreduce_average, pack, unpack, is_distributed
-
-import json
-import sys
 
 
 class Aggregator(ABC):
@@ -101,7 +91,6 @@ class PowerSGD(Aggregator):
         )
         self._allreduce = AllReduce()
 
-
     def aggregate(self, gradients: List[torch.Tensor], dist_group, dist_group_id, timer) -> List[torch.Tensor]:
         self.step_counter += 1
 
@@ -115,7 +104,9 @@ class PowerSGD(Aggregator):
         )
         
     def update_low_rank_weights(self, parameters: List[torch.Tensor], timer) -> None:
-        compressed_params, _ = self._split(parameters)
+        # if self.step_counter <= self.config.start_compressing_after_num_steps:
+        #     return
+        compressed_params, uncompressed_params = self._split(parameters)
         self._powersgd.update_low_rank_weights(compressed_params, timer)
         return
     
@@ -201,14 +192,6 @@ class BasicPowerSGD(Aggregator):
         self._qs = unpack(self._qs_buffer, qs_shapes)
         
         # related to parameters
-        
-        self.synchronization_freq = 20
-        self.curr_round = 0
-        # self.saved = False
-        
-        # save the mode parameters initially
-        self.model_parameters_track: List[torch.Tensor] = [p.clone().detach() for p in params]
-        
         self._ps_params_buffer, ps_params_shapes = pack(
             [
                 self._init_p_batch(shape, params, self.config.rank)
@@ -315,33 +298,12 @@ class BasicPowerSGD(Aggregator):
 
         # Increment the step counter
         self.step_counter += 1
+        
         return output_tensors
     
     
     
     def update_low_rank_weights(self, parameters: List[torch.Tensor], timer=None) -> None:
-        
-        # get the difference to estimate
-        # if self.curr_round == self.synchronization_freq - 1:
-        #     self.curr_round = 0
-        
-        # if torch.distributed.get_rank() == 0:
-        #     tensor_lists = [p.numpy().tolist() for p in parameters]
-        #     with open(f"something_{self.curr_round}_before.txt", "w") as f:
-        #         f.write(str(tensor_lists))
-                
-        for p, mp in zip(parameters, self.model_parameters_track):
-            # p.mul_((self.synchronization_freq - self.curr_round))
-            p.sub_(mp)
-        
-        # if torch.distributed.get_rank() == 0:
-        #     tensor_lists = [p.numpy().tolist() for p in parameters]
-        #     with open(f"something_{self.curr_round}_after.txt", "w") as f:
-        #         f.write(str(tensor_lists))
-        
-        # self.curr_round += 1
-        
-        # estimate the difference using low-rank matrices
         
         parameters_per_shape = self._matrices_per_shape(parameters)
         
@@ -370,6 +332,7 @@ class BasicPowerSGD(Aggregator):
             for group, in_batch, out_batch in zip(
                 shape_groups, in_batches, out_batches
             ):
+                # print(f'group[param_batch] = {group["param_batch"].shape} in_batch = {in_batch.shape} out_batch = {out_batch.shape}')
                 orthogonalize(in_batch)
                 torch.bmm(
                     batch_transpose(maybe_transpose(group["param_batch"])), 
@@ -382,27 +345,10 @@ class BasicPowerSGD(Aggregator):
         """
         Create a low-rank approximation of the average parameters by communicating with other workers.
         """
-        
-        # no compression synchronization 
-        # no_compression_weights = []
-        # total_num_workers = dist.get_world_size()
-        # for p in parameters:
-        #     tensor_copy = p.clone().detach()
-        #     dist.all_reduce(tensor_copy)
-        #     no_compression_weights.append(tensor_copy.mul_(1 / total_num_workers))
-            
-        # torch.save(no_compression_weights, 'no_compression_weights.pth')
-        
         output_tensors = [torch.empty_like(p) for p in parameters]
-
-        # get the difference to estimate
-        for p, mp in zip(parameters, self.model_parameters_track):
-            p.sub_(mp)
         
         parameters_per_shape = self._matrices_per_shape(parameters)
         outputs_per_shape = self._matrices_per_shape(output_tensors)
-        
-        prev_model_parameters = self._matrices_per_shape(self.model_parameters_track)
         
         shape_groups = [
             dict(
@@ -410,7 +356,6 @@ class BasicPowerSGD(Aggregator):
                 params=matrices,
                 outputs=outputs_per_shape[shape],
                 param_batch=torch.stack(matrices),
-                prev_model_parameters=prev_model_parameters[shape],
                 approximation=torch.zeros(
                     size=(len(matrices), *shape), device=self.device, dtype=self.dtype
                 ),
@@ -484,30 +429,11 @@ class BasicPowerSGD(Aggregator):
                     alpha=1/num_workers
                 )
 
-        # add the new approximation to the prev_model_parameters and set it to the output
         for group in shape_groups:
-            for o, pmp, approx in zip(
-                group["outputs"], group["prev_model_parameters"], group["approximation"]
+            for o, approx in zip(
+                group["outputs"], group["approximation"]
             ):
-                # if self.step_counter > 100 and not self.saved:
-                #     print(approx)
-                o.copy_(pmp.add_(approx))
-        
-        # print(self.step_counter)
-        # if self.step_counter > 100 and not self.saved:
-            # ot_human_readable = [ot.tolist() for ot in output_tensors]
-            # with open(f'model_{torch.distributed.get_rank()}.json', 'w') as f:
-            #     json.dump(ot_human_readable, f, indent = 4)
-            # self.saved = True
-            # print(output_tensors)
-            # print("Saved successfully")
-            
-            
-            
-        # estimated sync_weights is output_tensors
-        # now we need to get the actual without compression synchronized weights and print 
-        # torch.save(output_tensors, 'compressed_weights.pth')
-        # sys.exit()
+                o.copy_(approx)
 
         return output_tensors
     

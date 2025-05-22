@@ -1,16 +1,14 @@
 compress: True
 divide_groups: True
 num_groups: 2
-synchronize: True
-synchronization_freq: 20
+start_dividing_after: 100
+synchronize_weights: True
+synchronization_of_weights_freq: 21
+normal_synchronization: False
 
 compressor_conf: #only used when compress is set to True
-    rank: 4  # lower rank => more aggressive compression
+    rank: 1  # lower rank => more aggressive compression
     min_compression_rate: 2  # skip compression on some gradients
     num_iters_per_step: 1  # lower number => more aggressive compression
-    start_compressing_after_num_steps: 50
+    start_compressing_after_num_steps: 0
 
-
-# to do next:
-# remove the timer of some as that will take some time everytime, but log in randomly\
-# add total time taken to each step instead

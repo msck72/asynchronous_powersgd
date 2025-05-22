@@ -10,7 +10,7 @@ from powersgd.utils import allreduce_average, pack, unpack, is_distributed
 
 class Aggregator(ABC):
     @abstractmethod
-    def aggregate(self, gradients: List[torch.Tensor], group, timer) -> List[torch.Tensor]:
+    def aggregate(self, gradients: List[torch.Tensor], group, dist_group_id, timer) -> List[torch.Tensor]:
         """
         Aggregates gradients across workers into an (approximate) average gradient.
         This method also changes its input gradients. It either sets them to zero if there is no compression,
@@ -20,7 +20,7 @@ class Aggregator(ABC):
 
 
 class AllReduce(Aggregator):
-    def aggregate(self, gradients: List[torch.Tensor], group, timer) -> List[torch.Tensor]:
+    def aggregate(self, gradients: List[torch.Tensor], group, dist_group_id, timer) -> List[torch.Tensor]:
         if len(gradients) == 0:
             return []
         with timer('only_compress'):
@@ -64,16 +64,16 @@ class PowerSGD(Aggregator):
         )
         self._allreduce = AllReduce()
 
-    def aggregate(self, gradients: List[torch.Tensor], dist_group, timer) -> List[torch.Tensor]:
+    def aggregate(self, gradients: List[torch.Tensor], dist_group, dist_group_id, timer) -> List[torch.Tensor]:
         self.step_counter += 1
 
         if self.step_counter <= self.config.start_compressing_after_num_steps:
-            return self._allreduce.aggregate(gradients, dist_group, timer)
+            return self._allreduce.aggregate(gradients, dist_group, dist_group_id, timer)
 
         compressed_grads, uncompressed_grads = self._split(gradients)
         return self._merge(
-            self._powersgd.aggregate(compressed_grads, dist_group, timer),
-            self._allreduce.aggregate(uncompressed_grads, dist_group, timer),
+            self._powersgd.aggregate(compressed_grads, dist_group, dist_group_id, timer),
+            self._allreduce.aggregate(uncompressed_grads, dist_group, dist_group_id, timer),
         )
 
     def _split(self, params: List[torch.Tensor]):
@@ -147,7 +147,7 @@ class BasicPowerSGD(Aggregator):
         self._qs = unpack(self._qs_buffer, qs_shapes)
         
 
-    def aggregate(self, gradients: List[torch.Tensor], dist_group, timer) -> List[torch.Tensor]:
+    def aggregate(self, gradients: List[torch.Tensor], dist_group, dist_group_id, timer) -> List[torch.Tensor]:
         """
         Create a low-rank approximation of the average gradients by communicating with other workers.
         Modifies its inputs so that they contain the 'approximation error', used for the error feedback
@@ -155,7 +155,7 @@ class BasicPowerSGD(Aggregator):
         """  
 
         # Allocate memory for the return value of this function
-        with timer('only_comrpess'):
+        with timer('gradient_batching_similar_shapes'):
             output_tensors = [torch.empty_like(g) for g in gradients]
 
             # Group the gradients per shape, and view them as matrices (2D tensors)
@@ -174,8 +174,9 @@ class BasicPowerSGD(Aggregator):
                 for shape, matrices in list(gradients_per_shape.items())
             ]
 
-            num_iters_per_step = self.config.num_iters_per_step
-            for it in range(num_iters_per_step):
+        num_iters_per_step = self.config.num_iters_per_step
+        for it in range(num_iters_per_step):
+            with timer('compression'):
                 # Alternate between left and right matrix multiplications
                 iter_is_even = (self.step_counter * num_iters_per_step + it) % 2 == 0
                 if iter_is_even:
@@ -207,40 +208,42 @@ class BasicPowerSGD(Aggregator):
                         alpha=-1
                     )
 
-                # Average across workers
-                with timer("only_all_reduce"):
-                    if is_distributed():
-                        num_workers = torch.distributed.get_world_size(dist_group)
-                        # try sharing both p and q estimates
-                        # torch.distributed.all_reduce(self._ps_buffer, group=dist_group)
-                        # torch.distributed.all_reduce(self._qs_buffer, group=dist_group)
-                        
-                        torch.distributed.all_reduce(out_buffer, group=dist_group)
-                        out_buffer.mul_((1 / num_workers))
-                    else:
-                        num_workers = 1
+            # Average across workers
+            with timer("all_reduce"):
+                if is_distributed():
+                    num_workers = torch.distributed.get_world_size(dist_group)
+                    # print('num_workers = ', num_workers)
+                    # try sharing both p and q estimates
+                    # torch.distributed.all_reduce(self._ps_buffer, group=dist_group)
+                    # torch.distributed.all_reduce(self._qs_buffer, group=dist_group)
+                    
+                    torch.distributed.all_reduce(out_buffer, group=dist_group)
+                    # out_buffer.mul_((1 / num_workers))
+                else:
+                    num_workers = 1
 
-                with timer('update_approximation'):
-                    # Construct low-rank reconstruction and update the approximation and error buffer
-                    for group, in_batch, out_batch in zip(
-                        shape_groups, in_batches, out_batches
-                    ):
-                        maybe_transpose(group["approximation"]).baddbmm_(
-                            in_batch, 
-                            batch_transpose(out_batch),
-                            # alpha=1/num_workers
-                        )
+            with timer('update_approximation'):
+                # Construct low-rank reconstruction and update the approximation and error buffer
+                for group, in_batch, out_batch in zip(
+                    shape_groups, in_batches, out_batches
+                ):
+                    maybe_transpose(group["approximation"]).baddbmm_(
+                        in_batch, 
+                        batch_transpose(out_batch),
+                        alpha=1/num_workers
+                    )
 
-        # Un-batch the approximation and error feedback, write to the output
-        for group in shape_groups:
-            for o, m, approx, mb in zip(
-                group["outputs"],
-                group["grads"],
-                group["approximation"],
-                group["grad_batch"],
-            ):
-                o.copy_(approx)
-                m.copy_(mb)
+        with timer('unbatch_ob_put_ef'):
+            # Un-batch the approximation and error feedback, write to the output
+            for group in shape_groups:
+                for o, m, approx, mb in zip(
+                    group["outputs"],
+                    group["grads"],
+                    group["approximation"],
+                    group["grad_batch"],
+                ):
+                    o.copy_(approx)
+                    m.copy_(mb)
 
         # Increment the step counter
         self.step_counter += 1
