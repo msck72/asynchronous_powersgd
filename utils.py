@@ -1,36 +1,92 @@
 import torch
 import torch.distributed as dist
 import os
+import math
 
 
-def setup_groups(seed, group_cache, divide_groups):
+# # works for only two groups, hence deprecated Ha Ha
+# def setup_groups(seed, group_cache, divide_groups):
 
-    if not divide_groups:
-        return get_default_group(seed, group_cache)
+#     if not divide_groups:
+#         return get_default_group(seed, group_cache)
     
-    #Only wroks for two groups, shall be extended to n groups
+#     #Only wroks for two groups, shall be extended to n groups
+#     rank = dist.get_rank()
+#     world_size = dist.get_world_size()
+
+#     torch.manual_seed(seed)
+#     permutation_of_nodes = torch.randperm(world_size).tolist()
+
+#     partitioner = int(world_size / 2)
+#     group1_indices = sorted(permutation_of_nodes[:partitioner])
+#     group2_indices = sorted(permutation_of_nodes[partitioner:])
+
+#     key1, key2 = '_'.join(map(str, group1_indices)), '_'.join(map(str, group2_indices))
+    
+#     if key1 in group_cache:
+#         grp1, grp2 = group_cache[key1]
+#     else:
+#         grp1, grp2 = dist.new_group(group1_indices), dist.new_group(group2_indices)
+#         group_cache[key1] = (grp1, grp2)
+#         group_cache[key2] = (grp2, grp1)
+    
+#     # print(f"Groups: group1_indices  {group1_indices}, group2_indices = {group2_indices}\n\n")
+#     # returning process group and group ID that I belong to
+#     # print(f"{group1_indices}   {group2_indices}")
+#     return (grp1, group1_indices[0]) if rank in group1_indices else (grp2, group2_indices[0])
+
+
+
+
+
+
+def binary_search(arr, target, start, end):
+    if start > end:
+        return False
+
+    mid = (start + end) // 2
+    
+    if arr[mid] > target:
+        return binary_search(arr, target, start, mid - 1)
+    elif arr[mid] < target:
+        return binary_search(arr, target, mid + 1, end)
+    return True
+
+
+def create_groups(seed, group_cache, divide_groups, num_groups):
+    if not divide_groups:
+        return get_default_group(seed, group_cache), 0
+
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
     torch.manual_seed(seed)
-    permutation_of_nodes = torch.randperm(world_size).tolist()
+    permutation_of_nodes = torch.randperm(world_size).cpu().tolist()
+    # print(f'({rank}) permutation_of_nodes = {permutation_of_nodes}')
 
-    partitioner = int(world_size / 2)
-    group1_indices = sorted(permutation_of_nodes[:partitioner])
-    group2_indices = sorted(permutation_of_nodes[partitioner:])
+    num_nodes_per_group = math.ceil(world_size / num_groups)
+    
+    group_im_in, group_head = None, None
+    for i in range(num_groups):
+        sub_arr = permutation_of_nodes[i * num_nodes_per_group : (i + 1) * num_nodes_per_group]
+        sub_arr.sort()
+        # print(f'({rank}) sub_arr = {sub_arr}')
+        
+        key = '_'.join(map(str, sub_arr))
 
-    key1, key2 = '_'.join(map(str, group1_indices)), '_'.join(map(str, group2_indices))
+        if key not in group_cache:
+            # in case of dist, make a dist.group
+            group_cache[key] = dist.new_group(sub_arr)
+        
+        if binary_search(sub_arr, rank, 0, len(sub_arr) - 1):
+            group_im_in = group_cache[key]
+            group_head = key.split('_')[0]
+            # print(f'rank = ({rank}) key = {key} group_head = {group_head}')
     
-    if key1 in group_cache:
-        grp1, grp2 = group_cache[key1]
-    else:
-        grp1, grp2 = dist.new_group(group1_indices), dist.new_group(group2_indices)
-        group_cache[key1] = (grp1, grp2)
-        group_cache[key2] = (grp2, grp1)
-    
-    # print(f"Groups: group1_indices  {group1_indices}, group2_indices = {group2_indices}\n\n")
-    # returning process group and group ID that I belong to
-    return (grp1, group1_indices[0]) if rank in group1_indices else (grp2, group2_indices[0])
+    # print(f'({rank}) {group_head}')
+    return group_im_in, group_head
+
+
 
 def get_default_group(seed, group_cache):
 
