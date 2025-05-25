@@ -1,10 +1,10 @@
-compress: True
-divide_groups: True
-num_groups: 2
-start_dividing_after: 100
-synchronize_weights: True
-synchronization_of_weights_freq: 21
-normal_synchronization: False
+compress: True    # set True to compress the gradient.
+divide_groups: True    # set True to divide the nodes into groups.
+num_groups: 2    # If the divide_groups is set to True, mention the number of groups to be divided into.
+start_dividing_after: 100    # Denotes the number of batches after which the asynchronous training shall start.
+synchronize_weights: True    # set True to synchronize the weights of the model.
+synchronization_of_weights_freq: 21    # number of updates after which synchronization of weights shall be performed.
+normal_synchronization: False    # set True if synchronization of weights shall not be approximated.
 
 compressor_conf: #only used when compress is set to True
     rank: 1  # lower rank => more aggressive compression
